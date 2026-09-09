@@ -330,7 +330,7 @@ const KNOWN_FOLDERS = new Set([
   'all',
 ])
 
-/** Put the folder in `q` like sent/trash. Mixing `labelIds: INBOX` with `q: is:unread` returns read sent threads. */
+/** Folder in `q` like sent. Gmail search can lag threads.get; threadMatchesListQuery drops stale unread hits. */
 export function buildGmailSearchParams({
   folder,
   query,
@@ -391,15 +391,21 @@ export function buildGmailSearchParams({
   return { q, resolvedLabelIds }
 }
 
-/** Drop threads whose hydrated flags disagree with is:unread / is:starred in the list query. */
+/** Re-check UNREAD/STARRED after hydration. Gmail search can lag threads.get. */
 export function threadMatchesListQuery(
   thread: { unread: boolean; starred: boolean },
   query?: string,
 ): boolean {
   if (!query) return true
-  if (/\bis:unread\b/i.test(query) && !thread.unread) return false
-  if (/\bis:starred\b/i.test(query) && !thread.starred) return false
-  return true
+  if (/\bOR\b|\{/.test(query)) return true
+  return parseQueryTerms(query, { warn: false }).every((t) => {
+    if (t.operator !== 'is') return true
+    const v = t.value === 'unread' ? thread.unread
+      : t.value === 'read' ? !thread.unread
+      : t.value === 'starred' ? thread.starred
+      : null
+    return v === null ? true : t.negated ? !v : v
+  })
 }
 
 export class GmailClient {
@@ -606,11 +612,8 @@ export class GmailClient {
       if (!t.id) return null
 
       const cached = await this.getCachedThread(t.id)
-      if (cached && (!t.historyId || !cached.historyId || t.historyId === cached.historyId)) {
-        const parsed = this.parseThreadListItem(cached)
-        if (threadMatchesListQuery(parsed, query)) {
-          return { parsed, raw: cached }
-        }
+      if (cached && t.historyId && cached.historyId && t.historyId === cached.historyId) {
+        return { parsed: this.parseThreadListItem(cached), raw: cached }
       }
 
       // Boundary: threads.get — auth errors abort via mapConcurrent, others skip.
@@ -2463,7 +2466,7 @@ function matchesQuery(msg: ParsedMessage, query: string): boolean {
   return terms.every((term) => matchesTerm(msg, term))
 }
 
-function parseQueryTerms(query: string): QueryTerm[] {
+function parseQueryTerms(query: string, { warn = true }: { warn?: boolean } = {}): QueryTerm[] {
   const terms: QueryTerm[] = []
   const regex = /(-?)(?:(\w+):)?(?:"([^"]*)"|([\S]+))/gi
   let match: RegExpExecArray | null
@@ -2477,7 +2480,7 @@ function parseQueryTerms(query: string): QueryTerm[] {
     if (!rawOperator && value === 'or') continue
 
     if (rawOperator && SERVER_ONLY_OPERATORS.has(rawOperator)) {
-      if (!warnedOperators.has(rawOperator)) {
+      if (warn && !warnedOperators.has(rawOperator)) {
         warnedOperators.add(rawOperator)
         console.error(`# --query: "${rawOperator}:" is a server-only operator (use "mail search" instead), skipping`)
       }
@@ -2485,7 +2488,7 @@ function parseQueryTerms(query: string): QueryTerm[] {
     }
 
     if (rawOperator && !SUPPORTED_OPERATORS.has(rawOperator)) {
-      if (!warnedOperators.has(rawOperator)) {
+      if (warn && !warnedOperators.has(rawOperator)) {
         warnedOperators.add(rawOperator)
         console.error(`# --query: unknown operator "${rawOperator}:", skipping`)
       }

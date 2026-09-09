@@ -1083,6 +1083,7 @@ export default function Command() {
                   thread.from.email,
                   thread.from.name ?? '',
                   thread.account,
+                  ...thread.to.map((s) => s.email),
                 ]}
                 detail={detail}
                 actions={

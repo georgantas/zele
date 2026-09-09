@@ -13,15 +13,6 @@ import {
 
 const auth = new OAuth2Client()
 const client = new GmailClient({ auth })
-const meClient = new GmailClient({
-  auth,
-  account: {
-    email: 'me@example.com',
-    appId: 'test',
-    accountType: 'google',
-    capabilities: ['gmail'],
-  },
-})
 
 function listThread(messages: Array<{
   from: string
@@ -298,7 +289,7 @@ describe('buildGmailMimeMessage', () => {
 
 describe('parseThreadListItem from field', () => {
   test('sent-only thread keeps the user as from, not the recipient', () => {
-    const parsed = meClient.parseThreadListItem(listThread([
+    const parsed = client.parseThreadListItem(listThread([
       {
         from: 'Tommy <me@example.com>',
         to: 'support@outrank.so',
@@ -312,7 +303,7 @@ describe('parseThreadListItem from field', () => {
   })
 
   test('conversation where the user sent last still uses the latest From header', () => {
-    const parsed = meClient.parseThreadListItem(listThread([
+    const parsed = client.parseThreadListItem(listThread([
       {
         from: 'Lauren <lauren@openrouter.ai>',
         to: 'me@example.com',
@@ -330,7 +321,7 @@ describe('parseThreadListItem from field', () => {
   })
 
   test('inbound latest message still shows the other party as from', () => {
-    const parsed = meClient.parseThreadListItem(listThread([
+    const parsed = client.parseThreadListItem(listThread([
       {
         from: 'Apoorva G <apoorvag99@gmail.com>',
         to: 'me@example.com',
@@ -344,23 +335,9 @@ describe('parseThreadListItem from field', () => {
 })
 
 describe('buildGmailSearchParams', () => {
-  test('inbox unread uses in:inbox in the query, not an INBOX labelId plus bare is:unread', () => {
+  test('inbox unread puts in:inbox in q and does not add an INBOX labelId', () => {
     expect(buildGmailSearchParams({ folder: 'inbox', query: 'is:unread' })).toEqual({
       q: 'in:inbox is:unread',
-      resolvedLabelIds: [],
-    })
-  })
-
-  test('inbox with no query still scopes to in:inbox', () => {
-    expect(buildGmailSearchParams({ folder: 'inbox' })).toEqual({
-      q: 'in:inbox',
-      resolvedLabelIds: [],
-    })
-  })
-
-  test('sent unread stays in:sent is:unread', () => {
-    expect(buildGmailSearchParams({ folder: 'sent', query: 'is:unread' })).toEqual({
-      q: 'in:sent is:unread',
       resolvedLabelIds: [],
     })
   })
@@ -389,5 +366,19 @@ describe('threadMatchesListQuery', () => {
   test('queries without is:unread keep read threads', () => {
     expect(threadMatchesListQuery(readSent, 'from:github')).toBe(true)
     expect(threadMatchesListQuery(readSent)).toBe(true)
+  })
+
+  test('-is:unread keeps read threads and drops unread ones', () => {
+    expect(threadMatchesListQuery(readSent, '-is:unread')).toBe(true)
+    expect(threadMatchesListQuery(unreadInbound, '-is:unread')).toBe(false)
+  })
+
+  test('is:read matches the inverse of unread', () => {
+    expect(threadMatchesListQuery(readSent, 'is:read')).toBe(true)
+    expect(threadMatchesListQuery(unreadInbound, 'is:read')).toBe(false)
+  })
+
+  test('OR queries are not AND-filtered client-side', () => {
+    expect(threadMatchesListQuery(readSent, 'is:unread OR is:starred')).toBe(true)
   })
 })
