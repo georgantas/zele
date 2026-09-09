@@ -330,6 +330,78 @@ const KNOWN_FOLDERS = new Set([
   'all',
 ])
 
+/** Put the folder in `q` like sent/trash. Mixing `labelIds: INBOX` with `q: is:unread` returns read sent threads. */
+export function buildGmailSearchParams({
+  folder,
+  query,
+  labelIds,
+}: {
+  folder?: string
+  query?: string
+  labelIds?: string[]
+}) {
+  const resolvedLabelIds = [...(labelIds ?? [])]
+  let q = query ?? ''
+
+  if (!folder || folder === 'inbox') {
+    q = `in:inbox ${q}`.trim()
+    return { q, resolvedLabelIds }
+  }
+
+  const normalizedFolder = folder.toLowerCase()
+
+  if (!KNOWN_FOLDERS.has(normalizedFolder) && !/^[\w\/-]+$/.test(normalizedFolder)) {
+    throw new Error(
+      `Invalid folder/label name: "${folder}". Use alphanumeric characters, underscores, hyphens, and slashes only.`,
+    )
+  }
+
+  switch (normalizedFolder) {
+    case 'sent':
+      q = `in:sent ${q}`.trim()
+      break
+    case 'trash':
+    case 'bin':
+      q = `in:trash ${q}`.trim()
+      break
+    case 'spam':
+      q = `in:spam ${q}`.trim()
+      break
+    case 'drafts':
+    case 'draft':
+      q = `is:draft ${q}`.trim()
+      break
+    case 'starred':
+      q = `is:starred ${q}`.trim()
+      break
+    case 'archive':
+      q = `in:archive ${q}`.trim()
+      break
+    case 'snoozed':
+      q = `label:Snoozed ${q}`.trim()
+      break
+    case 'all':
+      q = `in:anywhere ${q}`.trim()
+      break
+    default:
+      q = `label:${normalizedFolder} ${q}`.trim()
+      break
+  }
+
+  return { q, resolvedLabelIds }
+}
+
+/** Drop threads whose hydrated flags disagree with is:unread / is:starred in the list query. */
+export function threadMatchesListQuery(
+  thread: { unread: boolean; starred: boolean },
+  query?: string,
+): boolean {
+  if (!query) return true
+  if (/\bis:unread\b/i.test(query) && !thread.unread) return false
+  if (/\bis:starred\b/i.test(query) && !thread.starred) return false
+  return true
+}
+
 export class GmailClient {
   private gmail: gmail_v1.Gmail
   private labelIdCache: Record<string, string> = {}
@@ -512,7 +584,7 @@ export class GmailClient {
     labelIds?: string[]
     pageToken?: string
   } = {}): Promise<ThreadListResult | AuthError | ApiError> {
-    const { q, resolvedLabelIds } = this.buildSearchParams(folder, query, labelIds)
+    const { q, resolvedLabelIds } = buildGmailSearchParams({ folder, query, labelIds })
 
     const res = await gmailBoundary(this.account?.email ?? 'unknown', () =>
       withRetry(() =>
@@ -535,9 +607,9 @@ export class GmailClient {
 
       const cached = await this.getCachedThread(t.id)
       if (cached && (!t.historyId || !cached.historyId || t.historyId === cached.historyId)) {
-        return {
-          parsed: this.parseThreadListItem(cached),
-          raw: cached,
+        const parsed = this.parseThreadListItem(cached)
+        if (threadMatchesListQuery(parsed, query)) {
+          return { parsed, raw: cached }
         }
       }
 
@@ -566,9 +638,10 @@ export class GmailClient {
     if (hydrated instanceof Error) return hydrated
 
     const valid = hydrated.filter((t): t is NonNullable<typeof t> => t !== null)
+    const matched = valid.filter((t) => threadMatchesListQuery(t.parsed, query))
     const result: ThreadListResult = {
-      threads: valid.map((t) => t.parsed),
-      rawThreads: valid.map((t) => t.raw),
+      threads: matched.map((t) => t.parsed),
+      rawThreads: matched.map((t) => t.raw),
       nextPageToken: res.data.nextPageToken ?? null,
       resultSizeEstimate: res.data.resultSizeEstimate ?? 0,
     }
@@ -1735,7 +1808,7 @@ export class GmailClient {
   }
 
   /** Parse raw gmail_v1.Schema$Thread (format: metadata) into ThreadListItem.
-   *  Shows the other party in conversations where user sent the latest message. */
+   *  `from` is the latest message From header. Do not rewrite it to the other party. */
   parseThreadListItem(raw: gmail_v1.Schema$Thread): ThreadListItem {
     const messages = raw.messages ?? []
     const nonDraftMessages = messages.filter((m) => !m.labelIds?.includes('DRAFT'))
@@ -1747,31 +1820,6 @@ export class GmailClient {
     const getHeader = (name: string) =>
       headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null
 
-    // Determine display sender — show other party when user sent the latest message
-    let displayFrom = parseFrom(getHeader('from') ?? '')
-    const latestIsFromUser = latest?.labelIds?.includes('SENT') ?? false
-
-    if (latestIsFromUser && this.account?.email) {
-      const getMsgHeader = (msg: gmail_v1.Schema$Message, name: string) =>
-        msg.payload?.headers?.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null
-
-      // Find most recent message NOT from the user
-      const otherPartyMsg = [...nonDraftMessages].reverse().find((m) => !m.labelIds?.includes('SENT'))
-      if (otherPartyMsg) {
-        const fromHeader = getMsgHeader(otherPartyMsg, 'from')
-        if (fromHeader) displayFrom = parseFrom(fromHeader)
-      } else {
-        // All messages from user — show first recipient
-        const firstMsg = nonDraftMessages[0] ?? messages[0]
-        if (firstMsg) {
-          const toHeader = getMsgHeader(firstMsg, 'to') ?? ''
-          const recipients = parseAddressList(toHeader)
-          if (recipients[0]) displayFrom = recipients[0]
-        }
-      }
-    }
-
-    // Parse recipients from latest message
     const toHeader = getHeader('to') ?? ''
     const ccHeaders = headers
       .filter((h) => h.name?.toLowerCase() === 'cc')
@@ -1802,7 +1850,7 @@ export class GmailClient {
       historyId: raw.historyId ?? null,
       snippet: sanitizeSnippet(latest?.snippet ?? ''),
       subject: (getHeader('subject') ?? '(no subject)').replace(/"/g, '').trim(),
-      from: displayFrom,
+      from: parseFrom(getHeader('from') ?? ''),
       to: toHeader ? parseAddressList(toHeader) : [],
       cc: ccHeaders.length > 0
         ? ccHeaders.filter((h) => h.trim().length > 0).flatMap((h) => parseAddressList(h))
@@ -2194,77 +2242,6 @@ export class GmailClient {
     })
     this.labelIdCache[labelNameOrId] = created.id
     return created.id
-  }
-
-  // =========================================================================
-  // Private: search / folder normalization
-  // =========================================================================
-
-  private buildSearchParams(
-    folder?: string,
-    query?: string,
-    labelIds?: string[],
-  ) {
-    const resolvedLabelIds = [...(labelIds ?? [])]
-    let q = query ?? ''
-
-    if (!folder || folder === 'inbox') {
-      if (!resolvedLabelIds.includes('INBOX')) {
-        resolvedLabelIds.push('INBOX')
-      }
-      return { q, resolvedLabelIds }
-    }
-
-    // For non-inbox folders, use Gmail search syntax.
-    // Caller-provided labelIds are preserved as additional filters.
-
-    // Normalize folder name to lowercase for consistent matching
-    const normalizedFolder = folder.toLowerCase()
-
-    // Validate custom label names to prevent query injection.
-    // Gmail query operators like "OR", "from:", parentheses, etc. could manipulate search results.
-    // Known folders are handled by the switch cases below; custom labels must be safe characters only.
-    // Slashes are allowed for nested labels (e.g., "work/projects").
-    if (!KNOWN_FOLDERS.has(normalizedFolder) && !/^[\w\/-]+$/.test(normalizedFolder)) {
-      throw new Error(
-        `Invalid folder/label name: "${folder}". Use alphanumeric characters, underscores, hyphens, and slashes only.`,
-      )
-    }
-
-    switch (normalizedFolder) {
-      case 'sent':
-        q = `in:sent ${q}`.trim()
-        break
-      case 'trash':
-      case 'bin':
-        q = `in:trash ${q}`.trim()
-        break
-      case 'spam':
-        q = `in:spam ${q}`.trim()
-        break
-      case 'drafts':
-      case 'draft':
-        q = `is:draft ${q}`.trim()
-        break
-      case 'starred':
-        q = `is:starred ${q}`.trim()
-        break
-      case 'archive':
-        q = `in:archive ${q}`.trim()
-        break
-      case 'snoozed':
-        q = `label:Snoozed ${q}`.trim()
-        break
-      case 'all':
-        q = `in:anywhere ${q}`.trim()
-        break
-      default:
-        // Treat as a label name (use normalized for consistency)
-        q = `label:${normalizedFolder} ${q}`.trim()
-        break
-    }
-
-    return { q, resolvedLabelIds }
   }
 
   // =========================================================================

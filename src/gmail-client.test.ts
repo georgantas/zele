@@ -3,11 +3,50 @@
 
 import { expect, test, describe } from 'vitest'
 import { OAuth2Client } from 'googleapis-common'
-import { buildGmailMimeMessage, GmailClient, parseAuthResults } from './gmail-client.js'
+import {
+  buildGmailMimeMessage,
+  buildGmailSearchParams,
+  GmailClient,
+  parseAuthResults,
+  threadMatchesListQuery,
+} from './gmail-client.js'
 
-// Create a real client instance for testing (no account context needed for parsing tests)
 const auth = new OAuth2Client()
 const client = new GmailClient({ auth })
+const meClient = new GmailClient({
+  auth,
+  account: {
+    email: 'me@example.com',
+    appId: 'test',
+    accountType: 'google',
+    capabilities: ['gmail'],
+  },
+})
+
+function listThread(messages: Array<{
+  from: string
+  to: string
+  labels: string[]
+  subject?: string
+  snippet?: string
+}>) {
+  return {
+    id: 'thread_list',
+    messages: messages.map((m, i) => ({
+      id: `msg_${i}`,
+      snippet: m.snippet ?? 'Hello',
+      labelIds: m.labels,
+      payload: {
+        headers: [
+          { name: 'from', value: m.from },
+          { name: 'to', value: m.to },
+          { name: 'subject', value: m.subject ?? 'Hello' },
+          { name: 'date', value: 'Tue, 10 Feb 2026 12:00:00 +0000' },
+        ],
+      },
+    })),
+  }
+}
 
 test('thread list snippet decodes HTML entities for TUI preview', () => {
   const rawThread = {
@@ -254,5 +293,101 @@ describe('buildGmailMimeMessage', () => {
     expect(mime).toContain('text/plain')
     expect(mime).not.toContain('multipart/mixed')
     expect(mime).toContain('No files')
+  })
+})
+
+describe('parseThreadListItem from field', () => {
+  test('sent-only thread keeps the user as from, not the recipient', () => {
+    const parsed = meClient.parseThreadListItem(listThread([
+      {
+        from: 'Tommy <me@example.com>',
+        to: 'support@outrank.so',
+        labels: ['SENT', 'INBOX'],
+        subject: 'Backlinks-only plan: one sub for multiple sites?',
+      },
+    ]) as any)
+    expect(parsed.from).toEqual({ name: 'Tommy', email: 'me@example.com' })
+    expect(parsed.to.map((s) => s.email)).toEqual(['support@outrank.so'])
+    expect(parsed.unread).toBe(false)
+  })
+
+  test('conversation where the user sent last still uses the latest From header', () => {
+    const parsed = meClient.parseThreadListItem(listThread([
+      {
+        from: 'Lauren <lauren@openrouter.ai>',
+        to: 'me@example.com',
+        labels: ['INBOX'],
+        subject: 'Re: Video call',
+      },
+      {
+        from: 'Tommy <me@example.com>',
+        to: 'lauren@openrouter.ai',
+        labels: ['SENT', 'INBOX'],
+        subject: 'Re: Video call',
+      },
+    ]) as any)
+    expect(parsed.from).toEqual({ name: 'Tommy', email: 'me@example.com' })
+  })
+
+  test('inbound latest message still shows the other party as from', () => {
+    const parsed = meClient.parseThreadListItem(listThread([
+      {
+        from: 'Apoorva G <apoorvag99@gmail.com>',
+        to: 'me@example.com',
+        labels: ['INBOX', 'UNREAD'],
+        subject: 'Cancellation + refund request',
+      },
+    ]) as any)
+    expect(parsed.from).toEqual({ name: 'Apoorva G', email: 'apoorvag99@gmail.com' })
+    expect(parsed.unread).toBe(true)
+  })
+})
+
+describe('buildGmailSearchParams', () => {
+  test('inbox unread uses in:inbox in the query, not an INBOX labelId plus bare is:unread', () => {
+    expect(buildGmailSearchParams({ folder: 'inbox', query: 'is:unread' })).toEqual({
+      q: 'in:inbox is:unread',
+      resolvedLabelIds: [],
+    })
+  })
+
+  test('inbox with no query still scopes to in:inbox', () => {
+    expect(buildGmailSearchParams({ folder: 'inbox' })).toEqual({
+      q: 'in:inbox',
+      resolvedLabelIds: [],
+    })
+  })
+
+  test('sent unread stays in:sent is:unread', () => {
+    expect(buildGmailSearchParams({ folder: 'sent', query: 'is:unread' })).toEqual({
+      q: 'in:sent is:unread',
+      resolvedLabelIds: [],
+    })
+  })
+})
+
+describe('threadMatchesListQuery', () => {
+  const readSent = {
+    unread: false,
+    starred: false,
+  }
+  const unreadInbound = {
+    unread: true,
+    starred: false,
+  }
+
+  test('is:unread drops threads that are not unread after hydration', () => {
+    expect(threadMatchesListQuery(readSent, 'is:unread')).toBe(false)
+    expect(threadMatchesListQuery(unreadInbound, 'is:unread')).toBe(true)
+  })
+
+  test('in:inbox is:unread still requires unread', () => {
+    expect(threadMatchesListQuery(readSent, 'in:inbox is:unread')).toBe(false)
+    expect(threadMatchesListQuery(unreadInbound, 'in:inbox is:unread')).toBe(true)
+  })
+
+  test('queries without is:unread keep read threads', () => {
+    expect(threadMatchesListQuery(readSent, 'from:github')).toBe(true)
+    expect(threadMatchesListQuery(readSent)).toBe(true)
   })
 })
