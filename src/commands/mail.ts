@@ -174,11 +174,19 @@ export function registerMailCommands(cli: ZeleCli) {
         }),
       )
 
-      const allResults = results.filter((r): r is Exclude<typeof r, Error> => {
-          if (r instanceof AuthError) { out.error(`${r.message}. Try: zele login`); return false }
-          if (r instanceof Error) { out.error(`Failed to fetch: ${r.message}`); return false }
-          return true
-        })
+      const failures: Error[] = []
+      const allResults: Array<{ email: string; result: ThreadListResult; labelMap: Map<string, string> }> = []
+      for (const r of results) {
+        if (r instanceof Error) failures.push(r)
+        else allResults.push(r)
+      }
+      if (allResults.length === 0) {
+        handleCommandError(failures[0] ?? new Error('Failed to fetch'))
+      }
+      for (const r of failures) {
+        if (r instanceof AuthError) out.error(`${r.message}. Try: zele login`)
+        else out.error(`Failed to fetch: ${r.message}`)
+      }
 
       // Merge label maps from all accounts
       const labelMap = new Map<string, string>()

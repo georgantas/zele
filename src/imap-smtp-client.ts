@@ -48,6 +48,20 @@ function isSentFolder(folder: string): boolean {
   return (FOLDER_FALLBACKS.sent ?? []).some((candidate) => candidate.toLowerCase() === normalized)
 }
 
+export function mailboxIsSent({
+  requestedFolder,
+  mailboxPath,
+  specialUse,
+}: {
+  requestedFolder?: string
+  mailboxPath: string
+  specialUse?: string | false
+}): boolean {
+  if (requestedFolder?.toLowerCase() === 'sent') return true
+  if (specialUse === '\\Sent') return true
+  return isSentFolder(mailboxPath)
+}
+
 /** Static fallback map from zele folder names to IMAP folder paths.
  *  Used only when specialUse discovery fails. */
 const FOLDER_FALLBACKS: Record<string, string[]> = {
@@ -403,7 +417,11 @@ export class ImapSmtpClient {
             if (!env) continue
             const flags = msg.flags ?? new Set()
             const threadId = makeThreadId(imapFolder, msg.uid)
-            const sent = isSentFolder(imapFolder)
+            const sent = mailboxIsSent({
+              requestedFolder: folder,
+              mailboxPath: imapFolder,
+              specialUse: client.mailbox !== false ? client.mailbox.specialUse ?? undefined : undefined,
+            })
 
             threads.push({
               id: threadId,

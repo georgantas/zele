@@ -592,14 +592,20 @@ export class GmailClient {
   } = {}): Promise<ThreadListResult | AuthError | ApiError> {
     const { q, resolvedLabelIds } = buildGmailSearchParams({ folder, query, labelIds })
 
-    const fetchPage = async (token?: string): Promise<ThreadListResult | AuthError | ApiError> => {
+    const fetchPage = async ({
+      token,
+      pageSize,
+    }: {
+      token?: string
+      pageSize: number
+    }): Promise<ThreadListResult | AuthError | ApiError> => {
       const res = await gmailBoundary(this.account?.email ?? 'unknown', () =>
         withRetry(() =>
           this.gmail.users.threads.list({
             userId: 'me',
             q: q || undefined,
             labelIds: resolvedLabelIds.length > 0 ? resolvedLabelIds : undefined,
-            maxResults,
+            maxResults: pageSize,
             pageToken: token || undefined,
           }),
         ),
@@ -651,7 +657,10 @@ export class GmailClient {
     let nextPageToken: string | null = null
 
     while (threads.length < maxResults) {
-      const page = await fetchPage(token)
+      const page = await fetchPage({
+        token,
+        pageSize: maxResults - threads.length,
+      })
       if (page instanceof Error) return page
       threads.push(...page.threads)
       rawThreads.push(...page.rawThreads)
@@ -661,9 +670,9 @@ export class GmailClient {
     }
 
     return {
-      threads: threads.slice(0, maxResults),
-      rawThreads: rawThreads.slice(0, maxResults),
-      nextPageToken: threads.length >= maxResults ? nextPageToken : null,
+      threads,
+      rawThreads,
+      nextPageToken,
     }
   }
 

@@ -10,6 +10,7 @@ import {
   parseAuthResults,
   threadMatchesListQuery,
 } from './gmail-client.js'
+import { mailboxIsSent } from './imap-smtp-client.js'
 import { formatFlags } from './output.js'
 
 const auth = new OAuth2Client()
@@ -341,6 +342,25 @@ describe('parseThreadListItem from field', () => {
     expect(parsed.unread).toBe(true)
     expect(parsed.sent).toBe(false)
     expect(formatFlags(parsed)).toBe('unread')
+  })
+})
+
+describe('mailboxIsSent', () => {
+  test('treats RFC 6154 Sent mailboxes as sent even when the path is not a fallback name', () => {
+    expect(mailboxIsSent({
+      requestedFolder: 'sent',
+      mailboxPath: '[Gmail]/Sent Mail',
+      specialUse: '\\Sent',
+    })).toBe(true)
+    expect(mailboxIsSent({
+      requestedFolder: 'inbox',
+      mailboxPath: '[Gmail]/Sent Mail',
+      specialUse: '\\Sent',
+    })).toBe(true)
+    expect(mailboxIsSent({
+      requestedFolder: 'inbox',
+      mailboxPath: 'INBOX',
+    })).toBe(false)
   })
 })
 
