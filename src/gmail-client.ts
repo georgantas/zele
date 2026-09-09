@@ -13,7 +13,7 @@ import type { OAuth2Client } from 'googleapis-common'
 import { createMimeMessage } from 'mimetext'
 import { parseFrom, parseAddressList, resolveReplyRecipients, replySubject, threadAnchor, checkThreadLatestSeen, type SentInThread, type ThreadReplyEnvelope } from './email-utils.js'
 import * as errore from 'errore'
-import { withRetry, mapConcurrent, AuthError, isAuthLikeError, ApiError, NotFoundError, EmptyThreadError, MissingDataError, abortableSleep, SelfRecipientError, AmbiguousRecipientError, UnseenLatestError } from './api-utils.js'
+import { withRetry, mapConcurrent, isTruthy, AuthError, isAuthLikeError, ApiError, NotFoundError, EmptyThreadError, MissingDataError, abortableSleep, SelfRecipientError, AmbiguousRecipientError, UnseenLatestError } from './api-utils.js'
 import { renderEmailBody } from './output.js'
 import * as orm from 'drizzle-orm'
 import { getDb, schema } from './db.js'
@@ -100,6 +100,7 @@ export interface ThreadListItem {
   labelIds: string[]
   unread: boolean
   starred: boolean
+  sent: boolean
   messageCount: number
   inReplyTo: string | null
   hasAttachments: boolean
@@ -112,7 +113,6 @@ export interface ThreadListResult {
   /** Raw Google gmail_v1.Schema$Thread metadata responses, parallel to threads[]. */
   rawThreads: gmail_v1.Schema$Thread[]
   nextPageToken: string | null
-  resultSizeEstimate: number
 }
 
 /** Result from getThread() — includes both parsed data and the raw Google response. */
@@ -592,64 +592,79 @@ export class GmailClient {
   } = {}): Promise<ThreadListResult | AuthError | ApiError> {
     const { q, resolvedLabelIds } = buildGmailSearchParams({ folder, query, labelIds })
 
-    const res = await gmailBoundary(this.account?.email ?? 'unknown', () =>
-      withRetry(() =>
-        this.gmail.users.threads.list({
-          userId: 'me',
-          q: q || undefined,
-          labelIds: resolvedLabelIds.length > 0 ? resolvedLabelIds : undefined,
-          maxResults,
-          pageToken: pageToken || undefined,
-        }),
-      ),
-    )
-    if (res instanceof Error) return res
-
-    const rawThreads = res.data.threads ?? []
-
-    // Hydrate with metadata — collect both raw and parsed
-    const hydrated = await mapConcurrent(rawThreads, async (t) => {
-      if (!t.id) return null
-
-      const cached = await this.getCachedThread(t.id)
-      if (cached && t.historyId && cached.historyId && t.historyId === cached.historyId) {
-        return { parsed: this.parseThreadListItem(cached), raw: cached }
-      }
-
-      // Boundary: threads.get — auth errors abort via mapConcurrent, others skip.
-      const detail = await gmailBoundary(this.account?.email ?? 'unknown', () =>
+    const fetchPage = async (token?: string): Promise<ThreadListResult | AuthError | ApiError> => {
+      const res = await gmailBoundary(this.account?.email ?? 'unknown', () =>
         withRetry(() =>
-          this.gmail.users.threads.get({
+          this.gmail.users.threads.list({
             userId: 'me',
-            id: t.id!,
-            format: 'full',
+            q: q || undefined,
+            labelIds: resolvedLabelIds.length > 0 ? resolvedLabelIds : undefined,
+            maxResults,
+            pageToken: token || undefined,
           }),
         ),
       )
-      if (detail instanceof AuthError) return detail
-      if (detail instanceof Error) return null
+      if (res instanceof Error) return res
 
-      const parsed = this.parseThread(detail.data)
-      await this.cacheThreadData(t.id, detail.data, parsed)
+      const pageThreads = res.data.threads ?? []
+      const hydrated = await mapConcurrent(pageThreads, async (t) => {
+        if (!t.id) return null
 
+        const cached = await this.getCachedThread(t.id)
+        if (cached && t.historyId && cached.historyId && t.historyId === cached.historyId) {
+          return { parsed: this.parseThreadListItem(cached), raw: cached }
+        }
+
+        const detail = await gmailBoundary(this.account?.email ?? 'unknown', () =>
+          withRetry(() =>
+            this.gmail.users.threads.get({
+              userId: 'me',
+              id: t.id!,
+              format: 'full',
+            }),
+          ),
+        )
+        if (detail instanceof AuthError) return detail
+        if (detail instanceof Error) return null
+
+        const parsed = this.parseThread(detail.data)
+        await this.cacheThreadData(t.id, detail.data, parsed)
+
+        return {
+          parsed: this.parseThreadListItem(detail.data),
+          raw: detail.data,
+        }
+      })
+      if (hydrated instanceof Error) return hydrated
+
+      const matched = hydrated.filter(isTruthy).filter((t) => threadMatchesListQuery(t.parsed, query))
       return {
-        parsed: this.parseThreadListItem(detail.data),
-        raw: detail.data,
+        threads: matched.map((t) => t.parsed),
+        rawThreads: matched.map((t) => t.raw),
+        nextPageToken: res.data.nextPageToken ?? null,
       }
-    })
-
-    if (hydrated instanceof Error) return hydrated
-
-    const valid = hydrated.filter((t): t is NonNullable<typeof t> => t !== null)
-    const matched = valid.filter((t) => threadMatchesListQuery(t.parsed, query))
-    const result: ThreadListResult = {
-      threads: matched.map((t) => t.parsed),
-      rawThreads: matched.map((t) => t.raw),
-      nextPageToken: res.data.nextPageToken ?? null,
-      resultSizeEstimate: res.data.resultSizeEstimate ?? 0,
     }
 
-    return result
+    const threads: ThreadListItem[] = []
+    const rawThreads: gmail_v1.Schema$Thread[] = []
+    let token = pageToken
+    let nextPageToken: string | null = null
+
+    while (threads.length < maxResults) {
+      const page = await fetchPage(token)
+      if (page instanceof Error) return page
+      threads.push(...page.threads)
+      rawThreads.push(...page.rawThreads)
+      nextPageToken = page.nextPageToken
+      if (!nextPageToken) break
+      token = nextPageToken
+    }
+
+    return {
+      threads: threads.slice(0, maxResults),
+      rawThreads: rawThreads.slice(0, maxResults),
+      nextPageToken: threads.length >= maxResults ? nextPageToken : null,
+    }
   }
 
   async getThread({
@@ -1345,7 +1360,7 @@ export class GmailClient {
     const addErr = resolvedAdd.find((r): r is AuthError | ApiError => r instanceof Error)
     if (addErr) return addErr
 
-    const resolvedRemoveRaw = await Promise.all(removeLabelIds.map((l) => this.lookupLabelId(l)))
+    const resolvedRemoveRaw = await Promise.all(removeLabelIds.map((l) => this.lookupLabel(l)))
     const removeErr = resolvedRemoveRaw.find((r): r is AuthError | ApiError => r instanceof Error)
     if (removeErr) return removeErr
     const resolvedRemove = resolvedRemoveRaw.filter((id): id is string => typeof id === 'string')
@@ -1862,6 +1877,7 @@ export class GmailClient {
       labelIds: allLabels,
       unread: allLabels.includes('UNREAD'),
       starred: allLabels.includes('STARRED'),
+      sent: latest?.labelIds?.includes('SENT') ?? false,
       messageCount: nonDraftMessages.length,
       inReplyTo,
       hasAttachments,
@@ -2209,7 +2225,7 @@ export class GmailClient {
   // =========================================================================
 
   /** Look up a label ID by name. Returns null if not found (never creates). */
-  private async lookupLabelId(labelNameOrId: string): Promise<string | null | AuthError | ApiError> {
+  async lookupLabel(labelNameOrId: string): Promise<string | null | AuthError | ApiError> {
     if (SYSTEM_LABEL_IDS.has(labelNameOrId)) return labelNameOrId
     if (this.labelIdCache[labelNameOrId]) return this.labelIdCache[labelNameOrId]!
 

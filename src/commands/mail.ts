@@ -13,7 +13,7 @@ import { getClients, getClient, listAccounts, login } from '../auth.js'
 import { replySubject, threadAnchor } from '../email-utils.js'
 import type { ThreadListResult } from '../gmail-client.js'
 import type { GmailClient } from '../gmail-client.js'
-import { AuthError } from '../api-utils.js'
+import { AuthError, NotFoundError, UnsupportedError } from '../api-utils.js'
 import { getThreadSeenMessageId, setThreadSeenMessageId } from '../db.js'
 import { hasUnsubscribeMechanism, hasOneClickUnsubscribe } from '../unsubscribe.js'
 import * as out from '../output.js'
@@ -139,10 +139,24 @@ export function registerMailCommands(cli: ZeleCli) {
       // Fetch threads and labels from all accounts concurrently
       const results = await Promise.all(
         clients.map(async ({ email, client, accountType }) => {
+          let labelIds: string[] | undefined
+          if (options.label) {
+            if (accountType !== 'google') {
+              return new UnsupportedError({
+                feature: 'Labels',
+                accountType: 'IMAP/SMTP',
+                hint: 'IMAP accounts use folders. Use --folder to browse different mailboxes.',
+              })
+            }
+            const labelId = await (client as GmailClient).lookupLabel(options.label)
+            if (labelId instanceof Error) return labelId
+            if (labelId === null) return new NotFoundError({ resource: `label "${options.label}"` })
+            labelIds = [labelId]
+          }
           const result = await client.listThreads({
             folder,
             maxResults: limit,
-            labelIds: options.label ? [options.label] : undefined,
+            labelIds,
             pageToken: options.page,
             query: options.filter,
           })

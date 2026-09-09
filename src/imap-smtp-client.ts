@@ -378,7 +378,6 @@ export class ImapSmtpClient {
             threads: [],
             rawThreads: [],
             nextPageToken: null,
-            resultSizeEstimate: 0,
           }
         }
 
@@ -404,6 +403,7 @@ export class ImapSmtpClient {
             if (!env) continue
             const flags = msg.flags ?? new Set()
             const threadId = makeThreadId(imapFolder, msg.uid)
+            const sent = isSentFolder(imapFolder)
 
             threads.push({
               id: threadId,
@@ -414,9 +414,10 @@ export class ImapSmtpClient {
               to: toSenders(env.to),
               cc: toSenders(env.cc),
               date: env.date?.toISOString() ?? new Date().toISOString(),
-              labelIds: [],
+              labelIds: sent ? ['SENT'] : [],
               unread: !flags.has('\\Seen'),
               starred: flags.has('\\Flagged'),
+              sent,
               messageCount: 1,
               inReplyTo: env.inReplyTo ?? null,
               hasAttachments: this.hasAttachments(msg),
@@ -436,7 +437,6 @@ export class ImapSmtpClient {
           threads,
           rawThreads: [],
           nextPageToken,
-          resultSizeEstimate: sorted.length,
         }
       } finally {
         lock.release()

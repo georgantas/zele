@@ -10,6 +10,7 @@ import {
   parseAuthResults,
   threadMatchesListQuery,
 } from './gmail-client.js'
+import { formatFlags } from './output.js'
 
 const auth = new OAuth2Client()
 const client = new GmailClient({ auth })
@@ -20,6 +21,7 @@ function listThread(messages: Array<{
   labels: string[]
   subject?: string
   snippet?: string
+  inReplyTo?: string
 }>) {
   return {
     id: 'thread_list',
@@ -33,6 +35,7 @@ function listThread(messages: Array<{
           { name: 'to', value: m.to },
           { name: 'subject', value: m.subject ?? 'Hello' },
           { name: 'date', value: 'Tue, 10 Feb 2026 12:00:00 +0000' },
+          ...(m.inReplyTo ? [{ name: 'in-reply-to', value: m.inReplyTo }] : []),
         ],
       },
     })),
@@ -300,6 +303,8 @@ describe('parseThreadListItem from field', () => {
     expect(parsed.from).toEqual({ name: 'Tommy', email: 'me@example.com' })
     expect(parsed.to.map((s) => s.email)).toEqual(['support@outrank.so'])
     expect(parsed.unread).toBe(false)
+    expect(parsed.sent).toBe(true)
+    expect(formatFlags(parsed)).toBe('sent')
   })
 
   test('conversation where the user sent last still uses the latest From header', () => {
@@ -315,9 +320,12 @@ describe('parseThreadListItem from field', () => {
         to: 'lauren@openrouter.ai',
         labels: ['SENT', 'INBOX'],
         subject: 'Re: Video call',
+        inReplyTo: '<lauren-msg>',
       },
     ]) as any)
     expect(parsed.from).toEqual({ name: 'Tommy', email: 'me@example.com' })
+    expect(parsed.sent).toBe(true)
+    expect(formatFlags(parsed)).toBe('sent, reply')
   })
 
   test('inbound latest message still shows the other party as from', () => {
@@ -331,6 +339,15 @@ describe('parseThreadListItem from field', () => {
     ]) as any)
     expect(parsed.from).toEqual({ name: 'Apoorva G', email: 'apoorvag99@gmail.com' })
     expect(parsed.unread).toBe(true)
+    expect(parsed.sent).toBe(false)
+    expect(formatFlags(parsed)).toBe('unread')
+  })
+})
+
+describe('lookupLabel', () => {
+  test('returns system label ids without calling Gmail', async () => {
+    expect(await client.lookupLabel('INBOX')).toBe('INBOX')
+    expect(await client.lookupLabel('SENT')).toBe('SENT')
   })
 })
 
