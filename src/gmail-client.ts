@@ -343,7 +343,11 @@ export function buildGmailSearchParams({
   const resolvedLabelIds = [...(labelIds ?? [])]
   let q = query ?? ''
 
-  if (!folder || folder === 'inbox') {
+  // mail search passes no folder: search all mail (Gmail excludes spam/trash).
+  if (!folder) {
+    return { q: q.trim(), resolvedLabelIds }
+  }
+  if (folder === 'inbox') {
     q = `in:inbox ${q}`.trim()
     return { q, resolvedLabelIds }
   }

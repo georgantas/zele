@@ -62,6 +62,149 @@ export function mailboxIsSent({
   return isSentFolder(mailboxPath)
 }
 
+const IMAP_IN_FOLDERS = new Set([
+  'inbox',
+  'sent',
+  'trash',
+  'spam',
+  'drafts',
+  'draft',
+  'archive',
+  'starred',
+])
+
+export type ImapSearchCriteria = {
+  all?: true
+  flagged?: true
+  unseen?: true
+  from?: string
+  to?: string
+  subject?: string
+  body?: string
+  since?: Date
+  before?: Date
+  header?: { 'Content-Type': string }
+  or?: ImapSearchCriteria[]
+}
+
+/** IMAP SEARCH is per mailbox. `in:` must be stripped or it becomes BODY text. */
+export function parseImapSearchQuery(
+  query: string,
+  { isStarred = false }: { isStarred?: boolean } = {},
+): { inFolder: string | undefined; searchCriteria: ImapSearchCriteria } {
+  const inMatch = query.match(/\bin:(\S+)/i)
+  const inRaw = inMatch?.[1]?.toLowerCase()
+  const inFolder = inRaw && IMAP_IN_FOLDERS.has(inRaw) ? inRaw : undefined
+  const starred = isStarred || inFolder === 'starred'
+
+  const baseCriteria: ImapSearchCriteria = starred ? { flagged: true } : {}
+  let searchCriteria: ImapSearchCriteria = { ...baseCriteria }
+  let hasSpecificCriteria = starred
+
+  const fromMatch = query.match(/from:(\S+)/i)
+  if (fromMatch) {
+    searchCriteria.from = fromMatch[1]
+    hasSpecificCriteria = true
+  }
+
+  const toMatch = query.match(/to:(\S+)/i)
+  if (toMatch) {
+    searchCriteria.to = toMatch[1]
+    hasSpecificCriteria = true
+  }
+
+  const subjectMatch = query.match(/subject:(?:"([^"]+)"|(\S+))/i)
+  if (subjectMatch) {
+    searchCriteria.subject = subjectMatch[1] ?? subjectMatch[2]
+    hasSpecificCriteria = true
+  }
+
+  const newerMatch = query.match(/newer_than:(\d+)([dm])/i)
+  if (newerMatch) {
+    const n = Number(newerMatch[1])
+    const unit = newerMatch[2]!.toLowerCase()
+    const since = new Date()
+    if (unit === 'd') since.setDate(since.getDate() - n)
+    else since.setMonth(since.getMonth() - n)
+    searchCriteria.since = since
+    hasSpecificCriteria = true
+  }
+
+  const olderMatch = query.match(/older_than:(\d+)([dm])/i)
+  if (olderMatch) {
+    const n = Number(olderMatch[1])
+    const unit = olderMatch[2]!.toLowerCase()
+    const before = new Date()
+    if (unit === 'd') before.setDate(before.getDate() - n)
+    else before.setMonth(before.getMonth() - n)
+    searchCriteria.before = before
+    hasSpecificCriteria = true
+  }
+
+  const afterMatch = query.match(/after:(\d{4}\/\d{1,2}\/\d{1,2})/i)
+  if (afterMatch) {
+    searchCriteria.since = new Date(afterMatch[1]!.replace(/\//g, '-'))
+    hasSpecificCriteria = true
+  }
+
+  const beforeMatch = query.match(/before:(\d{4}\/\d{1,2}\/\d{1,2})/i)
+  if (beforeMatch) {
+    searchCriteria.before = new Date(beforeMatch[1]!.replace(/\//g, '-'))
+    hasSpecificCriteria = true
+  }
+
+  if (/is:unread/i.test(query)) {
+    searchCriteria.unseen = true
+    hasSpecificCriteria = true
+  }
+  if (/is:starred/i.test(query)) {
+    searchCriteria.flagged = true
+    hasSpecificCriteria = true
+  }
+  if (/has:attachment/i.test(query)) {
+    searchCriteria.header = { 'Content-Type': 'multipart/mixed' }
+    hasSpecificCriteria = true
+  }
+
+  const plainText = query
+    .replace(/\bin:\S+/gi, '')
+    .replace(/from:\S+/gi, '')
+    .replace(/to:\S+/gi, '')
+    .replace(/subject:(?:"[^"]+"|[^\s]+)/gi, '')
+    .replace(/newer_than:\S+/gi, '')
+    .replace(/older_than:\S+/gi, '')
+    .replace(/after:\S+/gi, '')
+    .replace(/before:\S+/gi, '')
+    .replace(/is:\S+/gi, '')
+    .replace(/has:\S+/gi, '')
+    .trim()
+
+  if (plainText) {
+    if (hasSpecificCriteria) {
+      searchCriteria.body = plainText
+    } else {
+      searchCriteria = { or: [{ subject: plainText }, { body: plainText }] }
+    }
+  } else if (!hasSpecificCriteria) {
+    searchCriteria = { all: true }
+  }
+
+  return { inFolder, searchCriteria }
+}
+
+/** `mail search` has no folder, so hit Inbox and Sent. `in:` and `--folder` stay one mailbox. */
+export function imapSearchFolders({
+  folder,
+  inFolder,
+}: {
+  folder?: string
+  inFolder?: string
+}): string[] {
+  if (inFolder) return [inFolder]
+  if (folder) return [folder]
+  return ['inbox', 'sent']
+}
+
 /** Static fallback map from zele folder names to IMAP folder paths.
  *  Used only when specialUse discovery fails. */
 const FOLDER_FALLBACKS: Record<string, string[]> = {
@@ -299,165 +442,66 @@ export class ImapSmtpClient {
       }) as unknown as ThreadListResult | AuthError | ApiError
     }
 
+    const parsedQuery = query
+      ? parseImapSearchQuery(query, { isStarred })
+      : { inFolder: undefined, searchCriteria: isStarred ? { flagged: true } : { all: true } }
+    const folders = imapSearchFolders({ folder, inFolder: parsedQuery.inFolder })
+    const startIndex = pageToken ? Number(pageToken) : 0
+    const singleFolder = folders.length === 1
+    // One mailbox: UID page. Inbox+Sent: newest start+limit UIDs each, then merge by date.
+    const uidOffset = singleFolder ? startIndex : 0
+    const uidLimit = singleFolder ? maxResults : startIndex + maxResults
+
     return this.withImap(async (client) => {
-      const imapFolder = await this.resolveMailboxPath(client, folder ?? 'inbox')
-      const lock = await client.getMailboxLock(imapFolder)
-      try {
-        // Build search criteria — start with base criteria from folder
-        let searchCriteria: any = isStarred ? { flagged: true } : { all: true }
-
-        if (query) {
-          // Best-effort IMAP search: translate Gmail query syntax to IMAP SEARCH.
-          // Supported: from:, to:, subject:, newer_than:Nd/Nm, older_than:Nd/Nm,
-          //            after:YYYY/MM/DD, before:YYYY/MM/DD, is:unread, is:starred,
-          //            has:attachment, and plain text.
-          // Preserve base criteria (e.g. flagged from --folder starred)
-          const baseCriteria = isStarred ? { flagged: true } : {}
-          searchCriteria = { ...baseCriteria }
-          let hasSpecificCriteria = isStarred
-
-          const fromMatch = query.match(/from:(\S+)/i)
-          if (fromMatch) { searchCriteria.from = fromMatch[1]; hasSpecificCriteria = true }
-
-          const toMatch = query.match(/to:(\S+)/i)
-          if (toMatch) { searchCriteria.to = toMatch[1]; hasSpecificCriteria = true }
-
-          const subjectMatch = query.match(/subject:(?:"([^"]+)"|(\S+))/i)
-          if (subjectMatch) { searchCriteria.subject = subjectMatch[1] ?? subjectMatch[2]; hasSpecificCriteria = true }
-
-          // Date filters: newer_than:2d, newer_than:1m (days/months)
-          const newerMatch = query.match(/newer_than:(\d+)([dm])/i)
-          if (newerMatch) {
-            const n = Number(newerMatch[1])
-            const unit = newerMatch[2]!.toLowerCase()
-            const since = new Date()
-            if (unit === 'd') since.setDate(since.getDate() - n)
-            else since.setMonth(since.getMonth() - n)
-            searchCriteria.since = since
-            hasSpecificCriteria = true
-          }
-
-          const olderMatch = query.match(/older_than:(\d+)([dm])/i)
-          if (olderMatch) {
-            const n = Number(olderMatch[1])
-            const unit = olderMatch[2]!.toLowerCase()
-            const before = new Date()
-            if (unit === 'd') before.setDate(before.getDate() - n)
-            else before.setMonth(before.getMonth() - n)
-            searchCriteria.before = before
-            hasSpecificCriteria = true
-          }
-
-          // after:YYYY/MM/DD and before:YYYY/MM/DD
-          const afterMatch = query.match(/after:(\d{4}\/\d{1,2}\/\d{1,2})/i)
-          if (afterMatch) { searchCriteria.since = new Date(afterMatch[1]!.replace(/\//g, '-')); hasSpecificCriteria = true }
-
-          const beforeMatch = query.match(/before:(\d{4}\/\d{1,2}\/\d{1,2})/i)
-          if (beforeMatch) { searchCriteria.before = new Date(beforeMatch[1]!.replace(/\//g, '-')); hasSpecificCriteria = true }
-
-          // Flag filters
-          if (/is:unread/i.test(query)) { searchCriteria.unseen = true; hasSpecificCriteria = true }
-          if (/is:starred/i.test(query)) { searchCriteria.flagged = true; hasSpecificCriteria = true }
-          if (/has:attachment/i.test(query)) { searchCriteria.header = { 'Content-Type': 'multipart/mixed' }; hasSpecificCriteria = true }
-
-          // Plain text remainder (strip known operators)
-          const plainText = query
-            .replace(/from:\S+/gi, '')
-            .replace(/to:\S+/gi, '')
-            .replace(/subject:(?:"[^"]+"|[^\s]+)/gi, '')
-            .replace(/newer_than:\S+/gi, '')
-            .replace(/older_than:\S+/gi, '')
-            .replace(/after:\S+/gi, '')
-            .replace(/before:\S+/gi, '')
-            .replace(/is:\S+/gi, '')
-            .replace(/has:\S+/gi, '')
-            .trim()
-
-          if (plainText) {
-            // Search in subject and body for remaining text
-            if (hasSpecificCriteria) {
-              searchCriteria.body = plainText
-            } else {
-              searchCriteria = { or: [{ subject: plainText }, { body: plainText }] }
-            }
-          } else if (!hasSpecificCriteria) {
-            searchCriteria = { all: true }
-          }
+      const threads: ThreadListItem[] = []
+      let moreUids = false
+      for (const requested of folders) {
+        const resolved = await imapBoundary(this.account.email, async () => {
+          const path = await this.resolveMailboxPath(client, requested)
+          return { path, lock: await client.getMailboxLock(path) }
+        })
+        if (resolved instanceof AuthError) return resolved
+        if (resolved instanceof Error) {
+          if (requested === 'inbox' || folders.length === 1) return resolved
+          console.warn('Skipping IMAP mailbox', requested, resolved.message)
+          continue
         }
-
-        const searchResult = await client.search(searchCriteria, { uid: true })
-        const uids = searchResult === false ? [] : searchResult
-        if (uids.length === 0) {
-          return {
-            threads: [],
-            rawThreads: [],
-            nextPageToken: null,
-          }
-        }
-
-        // Sort by UID descending (newest first) and paginate
-        const sorted = [...uids].sort((a, b) => b - a)
-        const startIndex = pageToken ? Number(pageToken) : 0
-        const page = sorted.slice(startIndex, startIndex + maxResults)
-        const nextPageToken = startIndex + maxResults < sorted.length
-          ? String(startIndex + maxResults)
-          : null
-
-        // Fetch envelope data for the page
-        const threads: ThreadListItem[] = []
-        if (page.length > 0) {
-          const uidRange = page.join(',')
-          for await (const msg of client.fetch(uidRange, {
+        const { path, lock } = resolved
+        try {
+          const searchResult = await client.search(parsedQuery.searchCriteria, { uid: true })
+          const uids = searchResult === false ? [] : [...searchResult].sort((a, b) => b - a)
+          const pageUids = uids.slice(uidOffset, uidOffset + uidLimit)
+          if (uids.length > uidOffset + uidLimit) moreUids = true
+          if (pageUids.length === 0) continue
+          const specialUse = client.mailbox !== false ? client.mailbox.specialUse ?? undefined : undefined
+          for await (const msg of client.fetch(pageUids, {
             uid: true,
             envelope: true,
             flags: true,
             bodyStructure: true,
           }, { uid: true })) {
-            const env = msg.envelope
-            if (!env) continue
-            const flags = msg.flags ?? new Set()
-            const threadId = makeThreadId(imapFolder, msg.uid)
-            const sent = mailboxIsSent({
-              requestedFolder: folder,
-              mailboxPath: imapFolder,
-              specialUse: client.mailbox !== false ? client.mailbox.specialUse ?? undefined : undefined,
+            const item = this.threadFromImapMessage({
+              msg,
+              mailboxPath: path,
+              requestedFolder: requested,
+              specialUse,
             })
-
-            threads.push({
-              id: threadId,
-              historyId: null,
-              snippet: env.subject ?? '',
-              subject: env.subject ?? '(no subject)',
-              from: toSender(env.from?.[0]),
-              to: toSenders(env.to),
-              cc: toSenders(env.cc),
-              date: env.date?.toISOString() ?? new Date().toISOString(),
-              labelIds: sent ? ['SENT'] : [],
-              unread: !flags.has('\\Seen'),
-              starred: flags.has('\\Flagged'),
-              sent,
-              messageCount: 1,
-              inReplyTo: env.inReplyTo ?? null,
-              hasAttachments: this.hasAttachments(msg),
-              // IMAP list view uses envelope-only fetch, so raw headers aren't
-              // available. List-Unsubscribe stays null in list mode; it's
-              // resolved during getThread() where `source: true` is fetched.
-              listUnsubscribe: null,
-              listUnsubscribePost: null,
-            })
+            if (item) threads.push(item)
           }
+        } finally {
+          lock.release()
         }
+      }
 
-        // Sort by date descending (envelopes may not come in order)
-        threads.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-
-        return {
-          threads,
-          rawThreads: [],
-          nextPageToken,
-        }
-      } finally {
-        lock.release()
+      threads.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      const page = singleFolder ? threads : threads.slice(startIndex, startIndex + maxResults)
+      const hasMore = singleFolder
+        ? moreUids
+        : startIndex + maxResults < threads.length || moreUids
+      return {
+        threads: page,
+        rawThreads: [],
+        nextPageToken: hasMore ? String(startIndex + maxResults) : null,
       }
     }) as Promise<ThreadListResult | AuthError | ApiError>
   }
@@ -1421,6 +1465,46 @@ export class ImapSmtpClient {
   // =========================================================================
   // Private helpers
   // =========================================================================
+
+  private threadFromImapMessage({
+    msg,
+    mailboxPath,
+    requestedFolder,
+    specialUse,
+  }: {
+    msg: FetchMessageObject
+    mailboxPath: string
+    requestedFolder?: string
+    specialUse?: string | false
+  }): ThreadListItem | null {
+    const env = msg.envelope
+    if (!env) return null
+    const flags = msg.flags ?? new Set()
+    const sent = mailboxIsSent({
+      requestedFolder,
+      mailboxPath,
+      specialUse,
+    })
+    return {
+      id: makeThreadId(mailboxPath, msg.uid),
+      historyId: null,
+      snippet: env.subject ?? '',
+      subject: env.subject ?? '(no subject)',
+      from: toSender(env.from?.[0]),
+      to: toSenders(env.to),
+      cc: toSenders(env.cc),
+      date: env.date?.toISOString() ?? new Date().toISOString(),
+      labelIds: sent ? ['SENT'] : [],
+      unread: !flags.has('\\Seen'),
+      starred: flags.has('\\Flagged'),
+      sent,
+      messageCount: 1,
+      inReplyTo: env.inReplyTo ?? null,
+      hasAttachments: this.hasAttachments(msg),
+      listUnsubscribe: null,
+      listUnsubscribePost: null,
+    }
+  }
 
   /** Modify IMAP flags on messages. Groups by folder for efficiency. */
   private async modifyFlags(

@@ -378,6 +378,13 @@ describe('buildGmailSearchParams', () => {
       resolvedLabelIds: [],
     })
   })
+
+  test('mail search with no folder does not force in:inbox', () => {
+    expect(buildGmailSearchParams({ query: 'to:foo@bar.com' })).toEqual({
+      q: 'to:foo@bar.com',
+      resolvedLabelIds: [],
+    })
+  })
 })
 
 describe('threadMatchesListQuery', () => {

@@ -97,8 +97,9 @@ zele logout         # remove credentials
 ### Mail
 
 ```bash
-zele mail list --limit 100                        # list up to 100 recent threads
-zele mail list --filter "is:unread" --limit 100   # list unread threads
+zele mail list --limit 100                        # list up to 100 recent inbox threads
+zele mail list --filter "is:unread" --limit 100   # list unread inbox threads
+zele mail list --folder sent --limit 100          # list sent mail
 zele mail list --filter "is:unread" --limit 100 | yq '.[].id' | xargs zele mail read  # read all unread
 zele mail search "from:github" --limit 100        # search with Gmail query syntax
 zele mail read <thread-id>                        # read a thread
@@ -114,6 +115,8 @@ zele mail watch                                   # wait for the next new email
 zele mail watch --filter "is:unread from:alice"   # wait for a specific email
 zele mail watch --timeout 300                     # wait up to 5 minutes
 ```
+
+Default folder is **inbox**. Use `--folder sent` for mail you sent. `is:unread` only matches unread inbox threads.
 
 **Reply safety.** `mail reply` and `mail send --thread-id` **refuse to send** unless `mail read` already showed the live last message in that thread. This stops agents from answering a stale view after a new reply arrives. `--dry-run` does not send, so it skips the check. `--force` skips it too.
 
@@ -177,7 +180,7 @@ zele mail list --filter "in:archive" --limit 100
 
 ### Search query syntax
 
-For **Google accounts**, `mail search` and `mail list --filter` use [Gmail search operators](https://support.google.com/mail/answer/7190) server-side. For **IMAP accounts**, queries are translated to IMAP SEARCH criteria (a subset is supported).
+For **Google accounts**, `mail search` and `mail list --filter` use [Gmail search operators](https://support.google.com/mail/answer/7190) server-side. For **IMAP accounts**, queries are translated to IMAP SEARCH criteria (a subset is supported). IMAP `mail search` looks in **Inbox** and **Sent**. Use `in:sent` or `in:inbox` to search one mailbox.
 
 | Operator | Example | Google | IMAP |
 |---|---|---|---|
@@ -195,15 +198,17 @@ For **Google accounts**, `mail search` and `mail list --filter` use [Gmail searc
 | `-` (negate) | `-from:noreply` | yes | no |
 | `" "` (quotes) | `"exact phrase"` | yes | no |
 | `label:` | `label:work` | yes | no |
-| `in:` | `in:sent` | yes | no |
+| `in:` | `in:sent` | yes | yes |
 | `filename:` | `filename:pdf` | yes | no |
 | `size:` / `larger:` / `smaller:` | `larger:5M` | yes | no |
 | `OR` / `{ }` | `from:a OR from:b` | yes | no |
 
 ```bash
 zele mail list --filter "is:unread" --limit 100
+zele mail list --folder sent --limit 100
 zele mail list --filter "from:github newer_than:7d" --folder sent --limit 100
 zele mail search "from:github is:unread newer_than:7d" --limit 100
+zele mail search "in:sent to:me@example.com" --limit 20
 zele mail watch --filter "from:github has:attachment" --timeout 300
 ```
 
