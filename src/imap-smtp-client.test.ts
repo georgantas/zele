@@ -3,16 +3,16 @@ import { imapSearchFolders, parseImapSearchQuery } from './imap-smtp-client.js'
 
 describe('parseImapSearchQuery', () => {
   test('to: becomes IMAP TO and does not leave leftover plain text', () => {
-    expect(parseImapSearchQuery('to:shawn@mintlify.com')).toEqual({
+    expect(parseImapSearchQuery('to:alice@example.com')).toEqual({
       inFolder: undefined,
-      searchCriteria: { to: 'shawn@mintlify.com' },
+      searchCriteria: { to: 'alice@example.com' },
     })
   })
 
   test('in:sent selects Sent and is not searched as body text', () => {
-    expect(parseImapSearchQuery('in:sent to:shawn@mintlify.com')).toEqual({
+    expect(parseImapSearchQuery('in:sent to:alice@example.com')).toEqual({
       inFolder: 'sent',
-      searchCriteria: { to: 'shawn@mintlify.com' },
+      searchCriteria: { to: 'alice@example.com' },
     })
     expect(parseImapSearchQuery('in:sent')).toEqual({
       inFolder: 'sent',
@@ -21,24 +21,24 @@ describe('parseImapSearchQuery', () => {
   })
 
   test('in:sent with subject text searches subject or body in Sent', () => {
-    expect(parseImapSearchQuery('in:sent Invoice for three-week work trial')).toEqual({
+    expect(parseImapSearchQuery('in:sent Invoice for project work')).toEqual({
       inFolder: 'sent',
       searchCriteria: {
         or: [
-          { subject: 'Invoice for three-week work trial' },
-          { body: 'Invoice for three-week work trial' },
+          { subject: 'Invoice for project work' },
+          { body: 'Invoice for project work' },
         ],
       },
     })
   })
 
   test('plain subject text searches subject or body', () => {
-    expect(parseImapSearchQuery('Invoice for three-week work trial')).toEqual({
+    expect(parseImapSearchQuery('Invoice for project work')).toEqual({
       inFolder: undefined,
       searchCriteria: {
         or: [
-          { subject: 'Invoice for three-week work trial' },
-          { body: 'Invoice for three-week work trial' },
+          { subject: 'Invoice for project work' },
+          { body: 'Invoice for project work' },
         ],
       },
     })
@@ -62,13 +62,13 @@ describe('parseImapSearchQuery', () => {
 describe('imapSearchFolders', () => {
   test('mail search with no folder looks in Inbox and Sent', () => {
     expect(imapSearchFolders({
-      inFolder: parseImapSearchQuery('to:shawn@mintlify.com').inFolder,
+      inFolder: parseImapSearchQuery('to:alice@example.com').inFolder,
     })).toEqual(['inbox', 'sent'])
   })
 
   test('in:sent searches only Sent', () => {
     expect(imapSearchFolders({
-      inFolder: parseImapSearchQuery('in:sent to:shawn@mintlify.com').inFolder,
+      inFolder: parseImapSearchQuery('in:sent to:alice@example.com').inFolder,
     })).toEqual(['sent'])
   })
 
@@ -86,7 +86,7 @@ describe('imapSearchFolders', () => {
   test('in: in the query wins over --folder', () => {
     expect(imapSearchFolders({
       folder: 'inbox',
-      inFolder: parseImapSearchQuery('in:sent to:shawn@mintlify.com').inFolder,
+      inFolder: parseImapSearchQuery('in:sent to:alice@example.com').inFolder,
     })).toEqual(['sent'])
   })
 })
