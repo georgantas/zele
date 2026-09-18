@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'vitest'
-import { imapSearchFolders, parseImapSearchQuery, tlsSocketOptions } from './imap-smtp-client.js'
+import { imapSearchFolders, parseImapSearchQuery, tlsSocketOptions, imapTlsOptions } from './imap-smtp-client.js'
 
 describe('tlsSocketOptions', () => {
   test('no ca or insecure means default validation', () => {
@@ -12,6 +12,19 @@ describe('tlsSocketOptions', () => {
 
   test('insecure disables certificate verification', () => {
     expect(tlsSocketOptions({ ca: 'PEM', insecure: true })).toEqual({ ca: ['PEM'], rejectUnauthorized: false })
+  })
+})
+
+describe('imapTlsOptions', () => {
+  test('ip hosts drop imapflow servername=false so Bun accepts the connection', () => {
+    expect(imapTlsOptions({}, '127.0.0.1')).toStrictEqual({ servername: undefined })
+    expect(imapTlsOptions({ ca: 'PEM' }, '127.0.0.1')).toStrictEqual({ ca: ['PEM'], servername: undefined })
+    expect(imapTlsOptions({ ca: 'PEM' }, '::1')).toStrictEqual({ ca: ['PEM'], servername: undefined })
+  })
+
+  test('hostnames keep normal SNI behavior', () => {
+    expect(imapTlsOptions({}, 'imap.example.com')).toBeUndefined()
+    expect(imapTlsOptions({ ca: 'PEM' }, 'imap.example.com')).toEqual({ ca: ['PEM'] })
   })
 })
 

@@ -7,6 +7,7 @@
 // with threadId = "folder:uid" (e.g. "INBOX:12345").
 
 import { randomUUID } from 'node:crypto'
+import { isIP } from 'node:net'
 import { ImapFlow, type FetchMessageObject, type MessageEnvelopeObject, type MailboxObject } from 'imapflow'
 import type { Transporter } from 'nodemailer'
 import type SMTPTransport from 'nodemailer/lib/smtp-transport/index.js'
@@ -40,6 +41,15 @@ export function tlsSocketOptions(creds: { ca?: string; insecure?: boolean }): { 
     ...(creds.ca ? { ca: [creds.ca] } : {}),
     ...(creds.insecure ? { rejectUnauthorized: false } : {}),
   }
+}
+
+/** TLS options for imapflow. imapflow passes `servername: false` for IP hosts,
+ *  which Bun's tls.connect rejects; overriding it with `undefined` keeps IP
+ *  hosts (e.g. Proton Bridge on 127.0.0.1) working on both Node and Bun. */
+export function imapTlsOptions(creds: { ca?: string; insecure?: boolean }, host: string): { ca?: string[]; rejectUnauthorized?: boolean; servername?: string } | undefined {
+  const tls = tlsSocketOptions(creds)
+  if (!isIP(host)) return tls
+  return { ...(tls ?? {}), servername: undefined }
 }
 
 /** Parse a threadId in the format "FOLDER:UID" back to folder + uid. */
@@ -341,7 +351,7 @@ export class ImapSmtpClient {
     const auth = creds.oauth
       ? { user: creds.imap.user, accessToken: creds.oauth.accessToken }
       : { user: creds.imap.user, pass: creds.imap.password }
-    const tls = tlsSocketOptions(creds.imap)
+    const tls = imapTlsOptions(creds.imap, creds.imap.host)
     return new ImapFlow({
       host: creds.imap.host,
       port: creds.imap.port,

@@ -22,7 +22,7 @@ import { GmailClient } from './gmail-client.js'
 import { CalendarClient } from './calendar-client.js'
 import * as errore from 'errore'
 import { AuthError, UnsupportedError } from './api-utils.js'
-import { ImapSmtpClient, tlsSocketOptions } from './imap-smtp-client.js'
+import { ImapSmtpClient, imapTlsOptions, tlsSocketOptions } from './imap-smtp-client.js'
 import { waitForOAuthCode, type BrowserAuthOptions } from './oauth-callback-server.js'
 import {
   MICROSOFT_REDIRECT_PORT,
@@ -351,7 +351,7 @@ export async function loginImap(
 
   // Test IMAP connection
   const { ImapFlow } = await import('imapflow')
-  const imapTls = tlsSocketOptions({ ca, insecure })
+  const imapTls = imapTlsOptions({ ca, insecure }, imapHost)
   const testClient = new ImapFlow({
     host: imapHost,
     port: imapPort,
