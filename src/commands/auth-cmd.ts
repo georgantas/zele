@@ -119,8 +119,8 @@ export function registerAuthCommands(cli: ZeleCli) {
     .option('--smtp-password [smtpPassword]', z.string().optional().describe('SMTP password (overrides --password)'))
     .option('--smtp-tls', 'Force implicit TLS for SMTP (default: only on port 465; use for Proton Bridge SSL)')
     .option('--ca [ca]', z.string().optional().describe('Path to a PEM CA cert to trust (e.g. Proton Bridge cert.pem)'))
-    .option('--insecure', 'Skip TLS certificate verification (self-signed localhost certs)')
-    .option('--no-tls', 'Use STARTTLS instead of implicit TLS for IMAP (Proton Bridge 1143)')
+    .option('--insecure', 'Skip TLS certificate verification (unsafe; prefer --ca)')
+    .option('--no-tls', 'Disable implicit TLS for IMAP; STARTTLS is attempted when advertised')
     .action(async (options) => {
       const interactive = !isAgent && process.stdin.isTTY
 

@@ -93,7 +93,7 @@ zele login imap \
 
 Use `--imap-user` / `--smtp-user` if the login username differs from your email. Omit `--smtp-host` for read-only access.
 
-For self-signed localhost servers: `--ca <path>` trusts a PEM cert (Proton Bridge exports `cert.pem`), or `--insecure` skips verification (localhost only). Bridge SSL mode (implicit TLS on custom ports) needs `--smtp-tls`.
+For self-signed servers, prefer `--ca <path>` to trust a PEM certificate (Proton Bridge exports `cert.pem`). `--insecure` disables certificate verification and is unsafe. `--no-tls` disables implicit IMAP TLS; STARTTLS is still attempted when the server advertises it. Bridge SSL mode (implicit TLS on custom ports) needs `--smtp-tls`.
 
 ### Account management
 

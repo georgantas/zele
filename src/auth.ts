@@ -51,7 +51,7 @@ export interface ImapCredentials {
   tls: boolean
   /** PEM contents of a CA cert to trust (e.g. Proton Bridge cert.pem). */
   ca?: string
-  /** Skip TLS certificate verification (self-signed localhost certs). */
+  /** Skip TLS certificate verification. Unsafe; prefer a custom CA. */
   insecure?: boolean
 }
 

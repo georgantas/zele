@@ -33,8 +33,8 @@ import type {
 // ---------------------------------------------------------------------------
 
 /** Node TLS options for imapflow/nodemailer from stored credentials.
- *  Lets self-signed localhost servers (Proton Bridge) be trusted via a PEM CA
- *  or, as a last resort, have certificate verification disabled. */
+ *  Lets self-signed servers be trusted via a PEM CA or, as a last resort,
+ *  have certificate verification disabled. */
 export function tlsSocketOptions(creds: { ca?: string; insecure?: boolean }): { ca?: string[]; rejectUnauthorized?: boolean } | undefined {
   if (!creds.ca && !creds.insecure) return undefined
   return {
