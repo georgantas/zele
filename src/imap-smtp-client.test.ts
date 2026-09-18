@@ -1,5 +1,19 @@
 import { expect, test, describe } from 'vitest'
-import { imapSearchFolders, parseImapSearchQuery } from './imap-smtp-client.js'
+import { imapSearchFolders, parseImapSearchQuery, tlsSocketOptions } from './imap-smtp-client.js'
+
+describe('tlsSocketOptions', () => {
+  test('no ca or insecure means default validation', () => {
+    expect(tlsSocketOptions({})).toBeUndefined()
+  })
+
+  test('ca is trusted without disabling validation', () => {
+    expect(tlsSocketOptions({ ca: 'PEM' })).toEqual({ ca: ['PEM'] })
+  })
+
+  test('insecure disables certificate verification', () => {
+    expect(tlsSocketOptions({ ca: 'PEM', insecure: true })).toEqual({ ca: ['PEM'], rejectUnauthorized: false })
+  })
+})
 
 describe('parseImapSearchQuery', () => {
   test('to: becomes IMAP TO and does not leave leftover plain text', () => {

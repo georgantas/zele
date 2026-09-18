@@ -31,6 +31,17 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Node TLS options for imapflow/nodemailer from stored credentials.
+ *  Lets self-signed localhost servers (Proton Bridge) be trusted via a PEM CA
+ *  or, as a last resort, have certificate verification disabled. */
+export function tlsSocketOptions(creds: { ca?: string; insecure?: boolean }): { ca?: string[]; rejectUnauthorized?: boolean } | undefined {
+  if (!creds.ca && !creds.insecure) return undefined
+  return {
+    ...(creds.ca ? { ca: [creds.ca] } : {}),
+    ...(creds.insecure ? { rejectUnauthorized: false } : {}),
+  }
+}
+
 /** Parse a threadId in the format "FOLDER:UID" back to folder + uid. */
 function parseThreadId(threadId: string): { folder: string; uid: number } {
   const idx = threadId.lastIndexOf(':')
@@ -330,12 +341,14 @@ export class ImapSmtpClient {
     const auth = creds.oauth
       ? { user: creds.imap.user, accessToken: creds.oauth.accessToken }
       : { user: creds.imap.user, pass: creds.imap.password }
+    const tls = tlsSocketOptions(creds.imap)
     return new ImapFlow({
       host: creds.imap.host,
       port: creds.imap.port,
       secure: creds.imap.tls,
       auth,
       logger: false,
+      ...(tls ? { tls } : {}),
     })
   }
 
@@ -401,11 +414,13 @@ export class ImapSmtpClient {
     if (this.smtpTransporter && this.smtpAccessToken === creds.oauth?.accessToken) return this.smtpTransporter
     const nodemailer = await import('nodemailer')
     this.smtpAccessToken = creds.oauth?.accessToken
+    const smtpTls = tlsSocketOptions(creds.smtp)
     this.smtpTransporter = nodemailer.default.createTransport({
       host: creds.smtp.host,
       port: creds.smtp.port,
       secure: creds.smtp.tls,
       requireTLS: !creds.smtp.tls,
+      ...(smtpTls ? { tls: smtpTls } : {}),
       auth: creds.oauth
         ? { type: 'OAuth2', user: creds.smtp.user, accessToken: creds.oauth.accessToken, expires: creds.oauth.expiry }
         : { user: creds.smtp.user, pass: creds.smtp.password },

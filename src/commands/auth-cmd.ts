@@ -3,7 +3,9 @@
 // Supports multiple accounts: login adds accounts, logout removes one.
 
 import type { ZeleCli } from '../cli-types.js'
+import { readFileSync } from 'node:fs'
 import { z } from 'zod'
+import * as errore from 'errore'
 import { isAgent, type GokeExecutionContext } from 'goke'
 import * as clack from '@clack/prompts'
 import { login, loginImap, loginMicrosoft, logout, listAccounts, getAuthStatuses } from '../auth.js'
@@ -115,7 +117,10 @@ export function registerAuthCommands(cli: ZeleCli) {
     .option('--imap-password [imapPassword]', z.string().optional().describe('IMAP password (overrides --password)'))
     .option('--smtp-user [smtpUser]', z.string().optional().describe('SMTP username (defaults to --email)'))
     .option('--smtp-password [smtpPassword]', z.string().optional().describe('SMTP password (overrides --password)'))
-    .option('--no-tls', 'Disable TLS (not recommended)')
+    .option('--smtp-tls', 'Force implicit TLS for SMTP (default: only on port 465; use for Proton Bridge SSL)')
+    .option('--ca [ca]', z.string().optional().describe('Path to a PEM CA cert to trust (e.g. Proton Bridge cert.pem)'))
+    .option('--insecure', 'Skip TLS certificate verification (self-signed localhost certs)')
+    .option('--no-tls', 'Use STARTTLS instead of implicit TLS for IMAP (Proton Bridge 1143)')
     .action(async (options) => {
       const interactive = !isAgent && process.stdin.isTTY
 
@@ -234,6 +239,16 @@ export function registerAuthCommands(cli: ZeleCli) {
         password = v
       }
 
+      let ca: string | undefined
+      if (options.ca) {
+        const caResult = errore.tryFn({
+          try: () => readFileSync(options.ca!, 'utf8'),
+          catch: (err) => new Error(`Failed to read --ca file: ${options.ca}`, { cause: err }),
+        })
+        if (caResult instanceof Error) handleCommandError(caResult)
+        ca = caResult
+      }
+
       out.hint('Testing IMAP connection...')
 
       const result = await loginImap({
@@ -248,6 +263,9 @@ export function registerAuthCommands(cli: ZeleCli) {
         smtpUser: options.smtpUser,
         smtpPassword: options.smtpPassword,
         tls: options.noTls !== true,
+        smtpTls: options.smtpTls,
+        ca,
+        insecure: options.insecure,
       })
       if (result instanceof Error) handleCommandError(result)
 
